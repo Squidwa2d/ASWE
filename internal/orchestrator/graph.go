@@ -52,6 +52,7 @@ type Orchestrator struct {
 	minPlanLoops int // plan<->plan-review 最小循环数, 即便 AI 第一轮判 PASS 也强制再跑
 	maxCodeLoops int
 	projectDir   string
+	artifactDir  string
 
 	// 单元化 Agent 三件套; 若非 nil, plan-review PASS 后优先走模块化流水线.
 	unitAgents *unitAgents
@@ -66,6 +67,7 @@ type Options struct {
 	Nodes        map[state.Stage]agents.Agent
 	Mode         config.AutomationMode
 	ProjectDir   string
+	ArtifactDir  string
 	MaxPlanLoops int // 0 则使用默认 8
 	MinPlanLoops int // 0 则使用默认 2
 	MaxCodeLoops int // 0 则使用默认 8
@@ -114,6 +116,7 @@ func New(opts Options) *Orchestrator {
 		minPlanLoops: opts.MinPlanLoops,
 		maxCodeLoops: opts.MaxCodeLoops,
 		projectDir:   opts.ProjectDir,
+		artifactDir:  opts.ArtifactDir,
 		in:           bufio.NewReader(opts.In),
 		out:          opts.Out,
 	}
@@ -147,15 +150,25 @@ func (o *Orchestrator) Run(ctx context.Context, changeDir, proposalPath string) 
 	if o.projectDir != "" {
 		st.ProjectDir = o.projectDir
 	}
+	if o.artifactDir == "" {
+		o.artifactDir = st.ArtifactDir
+	}
+	if o.artifactDir == "" {
+		o.artifactDir = changeDir
+	}
+	st.ArtifactDir = o.artifactDir
+	if err := os.MkdirAll(o.artifactDir, 0o755); err != nil {
+		return fmt.Errorf("create artifact dir: %w", err)
+	}
 
 	for st.CurrentStage != state.StageDone && st.CurrentStage != state.StageFailed {
 		stage := st.CurrentStage
 
 		// === 模块化流水线钩子 ===
 		// 一旦进入 Dev 阶段 (无论是 plan-review PASS 首次进入, 还是断点续跑),
-		// 优先尝试走模块化流水线. 若解析失败则回退到线性 dev↔review↔test.
+		// 优先尝试走模块化流水线. plan.md 解析失败应中止并暴露错误, 不再静默降级.
 		if stage == state.StageDev && o.unitAgents != nil {
-			handled, err := o.runModulePipeline(ctx, changeDir, o.unitAgents)
+			handled, err := o.runModulePipeline(ctx, changeDir, o.artifactDir, o.unitAgents)
 			if handled {
 				if err != nil {
 					return err
@@ -194,7 +207,7 @@ func (o *Orchestrator) Run(ctx context.Context, changeDir, proposalPath string) 
 			state.StageSpec, state.StagePlan, state.StagePlanReview,
 			state.StageDev, state.StageReview, state.StageTest,
 		} {
-			if data := readNodeOutputAt(changeDir, s); data != "" {
+			if data := readNodeOutputAt(o.artifactDir, s, changeDir); data != "" {
 				prev[s] = data
 			}
 		}
@@ -203,6 +216,7 @@ func (o *Orchestrator) Run(ctx context.Context, changeDir, proposalPath string) 
 			ChangeID:       st.ChangeID,
 			WorkspaceDir:   st.WorkspaceDir,
 			ChangeDir:      changeDir,
+			ArtifactDir:    o.artifactDir,
 			ProjectDir:     st.ProjectDir,
 			ProposalPath:   proposalPath,
 			PrevOutputs:    prev,
@@ -278,9 +292,9 @@ func (o *Orchestrator) transition(st *state.State, cur state.Stage, out *agents.
 	switch cur {
 	case state.StagePlanReview:
 		// 机器侧强校验: YAML 必须存在且合法, 否则不管 AI 怎么说都视为 FAIL.
-		planMD := readNodeOutputAt(changeDir, state.StagePlan)
+		planMD := readNodeOutputAt(o.artifactDir, state.StagePlan, changeDir)
 		yamlErr := validatePlanModules(planMD)
-		// 最小轮数兵底: 第一轮(PlanIteration=0) 总算已完成 1 轮, 若 minPlanLoops=2
+		// 最小轮数兜底: 第一轮(PlanIteration=0) 总算已完成 1 轮, 若 minPlanLoops=2
 		// 则仅完成轮数 < 2 时要强制再跑; 仅在 AI 已判 PASS 且机校通过时才生效,
 		// 避免 FAIL 路径重复加计数.
 		completed := st.PlanIteration + 1
@@ -288,17 +302,16 @@ func (o *Orchestrator) transition(st *state.State, cur state.Stage, out *agents.
 			fmt.Fprintf(o.out, "ℹ️  plan<->plan-review 最小轮数未达 %d (已完成 %d), 强制再跑一轮以加深打磨\n",
 				o.minPlanLoops, completed)
 			out.Passed = false
-			appendPlanReviewOverride(changeDir,
-				fmt.Sprintf("本轮已完成 %d/%d 轮, 尚未达到最小轮数, 调度器强制再跑一轮以加深打磨. "+
-					"请 Plan-Agent 针对本次评审意见进一步细化: 模块拆分必须有明确依赖关系、"+
-					"每个单元的 scope/deliverable 必须可独立验收、验收标准可衡量.",
-					completed, o.minPlanLoops))
+			appendPlanReviewOverride(o.artifactDir,
+				"调度器要求进行额外质量打磨, 本轮不放行进入 Dev. "+
+					"请 Plan-Agent 不要只做表层润色, 必须重新检查并细化: spec 覆盖关系、模块依赖、"+
+					"每个单元的 scope/deliverable 独立可验收性、实施步骤粒度、风险缓解和验收标准可衡量性.")
 		}
 		// 机校不过关 → 撤销 AI 的 PASS
 		if out.Passed && yamlErr != nil {
 			fmt.Fprintf(o.out, "⚠️  plan.md 缺少/不合法 aswe-plan-modules YAML (%v), 撤销本轮 PASS\n", yamlErr)
 			out.Passed = false
-			appendPlanReviewOverride(changeDir, fmt.Sprintf(
+			appendPlanReviewOverride(o.artifactDir, fmt.Sprintf(
 				"机器校验失败: plan.md 未提供合法的 `# aswe-plan-modules` YAML 代码块.\n"+
 					"请 Plan-Agent 下一轮在 plan.md 末尾补上符合规范的 YAML 块, 原因: %v", yamlErr))
 		}
@@ -313,7 +326,7 @@ func (o *Orchestrator) transition(st *state.State, cur state.Stage, out *agents.
 			return state.StageFailed
 		}
 		st.PlanIteration++
-		st.PlanFeedback = readNodeOutputAt(changeDir, state.StagePlanReview)
+		st.PlanFeedback = readNodeOutputAt(o.artifactDir, state.StagePlanReview, changeDir)
 		fmt.Fprintf(o.out, "🔁 方案未通过, 进入第 %d/%d 轮 plan<->plan-review 循环\n",
 			st.PlanIteration, o.maxPlanLoops)
 		return state.StagePlan
@@ -328,7 +341,7 @@ func (o *Orchestrator) transition(st *state.State, cur state.Stage, out *agents.
 			return state.StageFailed
 		}
 		st.CodeIteration++
-		st.ReviewFeedback = readNodeOutputAt(changeDir, state.StageReview)
+		st.ReviewFeedback = readNodeOutputAt(o.artifactDir, state.StageReview, changeDir)
 		fmt.Fprintf(o.out, "🔁 代码评审未通过, 进入第 %d/%d 轮 dev 修复循环\n",
 			st.CodeIteration, o.maxCodeLoops)
 		return state.StageDev
@@ -343,7 +356,7 @@ func (o *Orchestrator) transition(st *state.State, cur state.Stage, out *agents.
 			return state.StageFailed
 		}
 		st.CodeIteration++
-		st.TestFeedback = readNodeOutputAt(changeDir, state.StageTest)
+		st.TestFeedback = readNodeOutputAt(o.artifactDir, state.StageTest, changeDir)
 		fmt.Fprintf(o.out, "🔁 测试未通过, 进入第 %d/%d 轮 dev 修复循环\n",
 			st.CodeIteration, o.maxCodeLoops)
 		return state.StageDev
@@ -421,7 +434,7 @@ func (o *Orchestrator) askBefore(stage state.Stage) (bool, error) {
 }
 
 // readNodeOutputAt 根据 stage 读 change 目录下对应文件.
-func readNodeOutputAt(changeDir string, s state.Stage) string {
+func readNodeOutputAt(artifactDir string, s state.Stage, fallbackDirs ...string) string {
 	var name string
 	switch s {
 	case state.StageSpec:
@@ -439,9 +452,15 @@ func readNodeOutputAt(changeDir string, s state.Stage) string {
 	default:
 		return ""
 	}
-	data, err := os.ReadFile(changeDir + string(os.PathSeparator) + name)
-	if err != nil {
-		return ""
+	dirs := append([]string{artifactDir}, fallbackDirs...)
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		data, err := os.ReadFile(dir + string(os.PathSeparator) + name)
+		if err == nil {
+			return string(data)
+		}
 	}
-	return string(data)
+	return ""
 }

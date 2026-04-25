@@ -36,6 +36,7 @@ func runStatus(changeID string) error {
 	fmt.Printf("change-id      : %s\n", st.ChangeID)
 	fmt.Printf("workspace      : %s\n", st.WorkspaceDir)
 	fmt.Printf("project dir    : %s\n", st.ProjectDir)
+	fmt.Printf("artifact dir   : %s\n", st.ArtifactDir)
 	fmt.Printf("current stage  : %s\n", st.CurrentStage)
 	fmt.Printf("plan iteration : %d\n", st.PlanIteration)
 	fmt.Printf("code iteration : %d\n", st.CodeIteration)

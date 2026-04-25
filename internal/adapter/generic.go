@@ -27,7 +27,10 @@ func (a *GenericAdapter) IsAvailable() bool {
 	if tpl == "" {
 		return false
 	}
-	head := strings.Fields(tpl)
+	head, err := splitCommand(tpl)
+	if err != nil {
+		return false
+	}
 	if len(head) == 0 {
 		return false
 	}
@@ -53,7 +56,10 @@ func (a *GenericAdapter) Invoke(ctx context.Context, req Request) (*Response, er
 	cmd = strings.ReplaceAll(cmd, "{{PROMPT_FILE}}", tmp.Name())
 	cmd = strings.ReplaceAll(cmd, "{{WORK_DIR}}", req.WorkDir)
 
-	fields := strings.Fields(cmd)
+	fields, err := splitCommand(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("parse generic command: %w", err)
+	}
 	if len(fields) == 0 {
 		return nil, fmt.Errorf("empty generic command")
 	}
@@ -71,4 +77,62 @@ func (a *GenericAdapter) Invoke(ctx context.Context, req Request) (*Response, er
 		RawStderr: stderr,
 		Adapter:   a.Name(),
 	}, nil
+}
+
+func splitCommand(s string) ([]string, error) {
+	var fields []string
+	var b strings.Builder
+	var quote rune
+	escaped := false
+	inField := false
+
+	flush := func() {
+		if inField {
+			fields = append(fields, b.String())
+			b.Reset()
+			inField = false
+		}
+	}
+
+	for _, r := range s {
+		if escaped {
+			b.WriteRune(r)
+			inField = true
+			escaped = false
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			escaped = true
+			inField = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				inField = true
+				continue
+			}
+			b.WriteRune(r)
+			inField = true
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			quote = r
+			inField = true
+		case ' ', '\t', '\n', '\r':
+			flush()
+		default:
+			b.WriteRune(r)
+			inField = true
+		}
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote")
+	}
+	flush()
+	return fields, nil
 }

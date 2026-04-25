@@ -7,52 +7,66 @@ import (
 )
 
 // buildClarifyPrompt 生成澄清追问的提示词.
-// completed: 截至当前已完成的澄清轮数; minTurns: 进入 proposal 前**至少**要完成的轮数.
-// 在未达到 minTurns 前, 会明确告诉模型"不允许 READY, 必须给出 1~3 个更精细的问题".
-func buildClarifyPrompt(qa []qaPair, completed, minTurns int) string {
+// forceQuestions 为 true 时, 上层调度器还不允许进入 proposal; 注意不要把轮数门槛暴露给模型,
+// 避免模型把"至少 N 轮"误解为"问满 N 轮即可结束".
+func buildClarifyPrompt(qa []qaPair, forceQuestions bool) string {
 	var history strings.Builder
 	for _, p := range qa {
 		history.WriteString(fmt.Sprintf("[%s]\n%s\n\n", strings.ToUpper(p.Role), p.Content))
 	}
 
-	progress := fmt.Sprintf("当前是第 %d/%d 轮澄清(最少要完成 %d 轮才能进入 proposal 生成).",
-		completed+1, minTurns, minTurns)
-
 	var policy string
-	if completed < minTurns {
-		policy = `【重要】本轮**不允许**输出 READY, 必须继续追问.
-请围绕以下维度**挑选尚未确认的 1~3 个最关键点**提出具体问题, 不要问空话、不要重复已经问过的:
-  - 目标用户与使用场景
-  - 核心功能与边界场景
-  - 数据模型 / 持久化与同步策略
-  - 非功能性需求 (性能/并发/隐私/离线/权限)
-  - 验收标准与成功指标
-  - 技术约束或已有系统集成点
+	if forceQuestions {
+		policy = `本轮必须继续澄清, 不允许输出 READY.
+请先基于对话历史识别仍不确定的信息缺口, 再只挑选 1~3 个最关键、最能影响实现决策的问题继续追问.
+不要因为已经问过若干轮就收束; 只有信息真的足够支撑可执行 proposal 时, 后续轮次才可能 READY.
 
-只输出如下 QUESTIONS 块, 不要输出 READY, 不要其它寒暄:
+重点检查这些维度是否仍有缺口:
+- 目标用户与真实使用场景
+- 核心功能、边界场景与不做什么
+- 数据模型 / 持久化 / 同步策略
+- 权限、隐私、安全、性能、容量、离线等非功能需求
+- 可验证的验收标准与成功指标
+- 技术约束、已有系统集成点、上线形态
+
+只输出如下格式, 不要寒暄:
+STATUS: NEEDS_MORE_INFO
+MISSING:
+- 信息缺口
 QUESTIONS:
 - 第一个问题
 - 第二个问题`
 	} else {
-		policy = `评估当前信息是否足以写出一份完整的 OpenSpec proposal (包含 Why / What Changes / 目标用户 / 验收标准 / 关键非功能需求).
-- 如果信息已足够, 只输出一行:
-  READY
-- 如果还不够, 输出 1~3 个最关键的追问 (问题要具体, 不要问"你还希望怎样"这种空话). 格式:
-  QUESTIONS:
-  - 第一个问题
-  - 第二个问题
+		policy = `评估当前信息是否足以写出一份完整、可执行的 OpenSpec proposal.
+不要把对话轮数当成完成依据; 只根据信息充分度判断.
 
-只输出 READY 或上述 QUESTIONS 块, 不要输出任何其它内容.`
+必须同时满足以下条件才允许 READY:
+- Why / What Changes 能写清楚, 且不是泛泛描述
+- 目标用户、主要场景、核心流程明确
+- 功能边界和关键边界场景明确
+- 验收标准具体、可验证
+- 关键非功能需求与技术/集成约束没有阻塞性未知项
+
+如果信息已足够, 只输出:
+STATUS: READY
+
+如果还不够, 输出:
+STATUS: NEEDS_MORE_INFO
+MISSING:
+- 信息缺口
+QUESTIONS:
+- 第一个问题
+- 第二个问题
+
+问题要具体, 不要问"你还希望怎样"这种空话; 不要输出任何其它内容.`
 	}
 
 	return fmt.Sprintf(`你是一名资深产品经理, 任务是把用户的模糊需求澄清成可执行的软件需求.
-%s
-
 对话历史如下:
 %s
 请严格按以下规则输出, 不要有多余寒暄:
 
-%s`, progress, history.String(), policy)
+%s`, history.String(), policy)
 }
 
 // defaultFallbackQuestions 当模型在"必须追问"的阶段却没给出任何问题时, 用这组默认问题兜底,
@@ -92,14 +106,18 @@ func parseClarifyResponse(s string) ([]string, bool) {
 	if trimmed == "" {
 		return nil, false
 	}
-	// 仅当一整行就是 READY(或 READY 开头且无其它有效问题) 时才视为就绪
+	// 仅当结构化状态或一整行明确 READY 时才视为就绪.
 	upper := strings.ToUpper(trimmed)
-	if upper == "READY" || strings.HasPrefix(upper, "READY\n") {
+	if upper == "READY" || strings.HasPrefix(upper, "READY\n") || regexp.MustCompile(`(?mi)^\s*STATUS:\s*READY\s*$`).MatchString(trimmed) {
 		return nil, true
 	}
-	// 提取每一行以 "-" 或 "*" 或 数字. 开头的条目
+	questionBlock := extractSection(trimmed, "QUESTIONS")
+	if questionBlock == "" {
+		questionBlock = trimmed
+	}
+	// 提取每一行以 "-" 或 "*" 或 数字. 开头的条目.
 	re := regexp.MustCompile(`(?m)^\s*(?:[-*]|\d+[\.)])\s+(.+)$`)
-	matches := re.FindAllStringSubmatch(trimmed, -1)
+	matches := re.FindAllStringSubmatch(questionBlock, -1)
 	var qs []string
 	for _, m := range matches {
 		q := strings.TrimSpace(m[1])
@@ -109,15 +127,26 @@ func parseClarifyResponse(s string) ([]string, bool) {
 	}
 	// 如果没匹配到列表但有内容, 退化成把非空行都当作问题
 	if len(qs) == 0 {
-		for _, line := range strings.Split(trimmed, "\n") {
+		for _, line := range strings.Split(questionBlock, "\n") {
 			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(strings.ToUpper(line), "QUESTIONS") {
+			upperLine := strings.ToUpper(line)
+			if line == "" || strings.HasPrefix(upperLine, "QUESTIONS") ||
+				strings.HasPrefix(upperLine, "STATUS:") || strings.HasPrefix(upperLine, "MISSING:") {
 				continue
 			}
 			qs = append(qs, line)
 		}
 	}
 	return qs, false
+}
+
+func extractSection(s, name string) string {
+	re := regexp.MustCompile(`(?mis)^\s*` + regexp.QuoteMeta(name) + `\s*:\s*\n(.*?)(?:\n\s*[A-Z_ ]+\s*:\s*\n|\z)`)
+	m := re.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
 }
 
 // buildProposalPrompt 生成 proposal.md 的最终提示词.

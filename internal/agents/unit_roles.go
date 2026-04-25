@@ -1,7 +1,7 @@
 // Package agents 的"单元化"版本 Dev/Review/Test.
 //
 // 与旧版一把梭的 Dev/Review/Test 不同, 这里每次只针对一个 Unit 执行:
-//   - 产物写入 <ChangeDir>/units/<unit-id>/{dev,review,test}.md, 不覆盖旧单元
+//   - 产物写入 <ArtifactDir>/units/<unit-id>/{dev,review,test}.md, 不覆盖旧单元
 //   - prompt 里明确约束本轮只处理该 Unit 的 scope (软约束, 跨单元改动需在报告里声明)
 package agents
 
@@ -22,6 +22,7 @@ type UnitInput struct {
 	ChangeID     string
 	WorkspaceDir string
 	ChangeDir    string
+	ArtifactDir  string
 	ProjectDir   string
 
 	Spec string // spec.md 全文 (给 AI 作上下文)
@@ -56,10 +57,10 @@ type UnitAgent interface {
 
 // --- 共享工具 ---
 
-// unitDir 返回 <ChangeDir>/units/<unit-id>/, 不存在则创建.
-func unitDir(changeDir, unitID string) (string, error) {
+// unitDir 返回 <ArtifactDir>/units/<unit-id>/, 不存在则创建.
+func unitDir(artifactDir, unitID string) (string, error) {
 	safe := strings.ReplaceAll(unitID, string(os.PathSeparator), "_")
-	dir := filepath.Join(changeDir, "units", safe)
+	dir := filepath.Join(artifactDir, "units", safe)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -85,7 +86,11 @@ func invokeUnit(ctx context.Context, cli adapter.CLIAdapter, stage state.Stage,
 	if err != nil {
 		return nil, err
 	}
-	dir, err := unitDir(in.ChangeDir, in.Unit.ID)
+	artifactDir := in.ArtifactDir
+	if artifactDir == "" {
+		artifactDir = in.ChangeDir
+	}
+	dir, err := unitDir(artifactDir, in.Unit.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +196,7 @@ func (a *ReviewUnitAgent) Stage() state.Stage               { return state.Stage
 
 func (a *ReviewUnitAgent) RunUnit(ctx context.Context, in *UnitInput) (*UnitOutput, error) {
 	tree := listProjectTree(in.ProjectDir, 6)
-	devReport := readUnitArtifact(in.ChangeDir, in.Unit.ID, "dev.md")
+	devReport := readUnitArtifact(in.ArtifactDir, in.ChangeDir, in.Unit.ID, "dev.md")
 
 	body := fmt.Sprintf(`你是 Code-Review-Agent, 对**单元 %s** 的本轮 Dev 产出做审查.
 只读不改. 结论仅覆盖本单元的 scope; 其他单元会由独立的 review 轮次审查.
@@ -248,7 +253,7 @@ func (a *TestUnitAgent) Stage() state.Stage             { return state.StageTest
 
 func (a *TestUnitAgent) RunUnit(ctx context.Context, in *UnitInput) (*UnitOutput, error) {
 	tree := listProjectTree(in.ProjectDir, 6)
-	devReport := readUnitArtifact(in.ChangeDir, in.Unit.ID, "dev.md")
+	devReport := readUnitArtifact(in.ArtifactDir, in.ChangeDir, in.Unit.ID, "dev.md")
 	kind := detectProjectKind(in.ProjectDir)
 
 	var strategy string
@@ -310,12 +315,17 @@ spec:
 }
 
 // readUnitArtifact 读取单元产物文件 (dev.md/review.md/test.md).
-func readUnitArtifact(changeDir, unitID, name string) string {
+func readUnitArtifact(artifactDir, legacyChangeDir, unitID, name string) string {
 	safe := strings.ReplaceAll(unitID, string(os.PathSeparator), "_")
-	p := filepath.Join(changeDir, "units", safe, name)
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return ""
+	for _, dir := range []string{artifactDir, legacyChangeDir} {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, "units", safe, name)
+		data, err := os.ReadFile(p)
+		if err == nil {
+			return string(data)
+		}
 	}
-	return string(data)
+	return ""
 }

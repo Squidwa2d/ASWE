@@ -86,11 +86,7 @@ func NewPlan(cli adapter.CLIAdapter) *PlanAgent {
 func (a *PlanAgent) Run(ctx context.Context, in *RunInput) (*RunOutput, error) {
 	spec := in.PrevOutputs[state.StageSpec]
 
-	iterBadge := ""
 	feedbackSection := ""
-	if in.PlanIteration > 0 {
-		iterBadge = fmt.Sprintf(" (第 %d 轮方案迭代)", in.PlanIteration)
-	}
 	if strings.TrimSpace(in.PlanFeedback) != "" {
 		feedbackSection = fmt.Sprintf(`
 【上一轮 Plan-Review 反馈, 必须逐条解决】
@@ -100,7 +96,7 @@ func (a *PlanAgent) Run(ctx context.Context, in *RunInput) (*RunOutput, error) {
 `, in.PlanFeedback)
 	}
 
-	body := fmt.Sprintf(`你是 Plan-Agent%s. 你的任务是**仅输出技术方案**, 现在还不能写代码.
+	body := fmt.Sprintf(`你是 Plan-Agent. 你的任务是**仅输出技术方案**, 现在还不能写代码.
 等 Plan-Review 评审通过后, Dev-Agent 才会在下一阶段真正实现.
 
 spec:
@@ -142,7 +138,7 @@ spec:
     3. 模块之间允许依赖, 调度器会按数组顺序串行执行模块.
     4. 每个单元的 scope 应尽量不与其他单元重叠.
 - 末尾单独一行: VERDICT: PASS (方案生成本身总是 PASS, 是否可用由 Plan-Review 决定)`,
-		iterBadge, spec, feedbackSection, in.ProjectDir)
+		spec, feedbackSection, in.ProjectDir)
 
 	prompt := withSafety(in.ProjectDir, safetyRulesForReader, body)
 	out, raw, err := a.invokeWith(ctx, in, prompt, in.WorkspaceDir, 600)
@@ -168,12 +164,8 @@ func (a *PlanReviewAgent) Run(ctx context.Context, in *RunInput) (*RunOutput, er
 	spec := in.PrevOutputs[state.StageSpec]
 	plan := in.PrevOutputs[state.StagePlan]
 
-	iterBadge := ""
-	if in.PlanIteration > 0 {
-		iterBadge = fmt.Sprintf(" (第 %d 轮评审)", in.PlanIteration)
-	}
-
-	body := fmt.Sprintf(`你是 Plan-Review-Agent%s. 对 Plan-Agent 产出的方案做严格评审, 判定是否允许进入 Dev 阶段真正写代码.
+	body := fmt.Sprintf(`你是 Plan-Review-Agent. 对 Plan-Agent 产出的方案做严格评审, 判定是否允许进入 Dev 阶段真正写代码.
+不要因为已经评审过若干轮就放行; 只能根据方案质量和可实施性判断 PASS/FAIL.
 
 spec:
 ----
@@ -201,19 +193,20 @@ plan.md:
 
 输出要求(markdown, 写入 plan-review.md):
 - "## 结论" : 一句话说明是否通过方案评审.
+- "## 放行门槛" : 用 STATUS: READY 或 STATUS: NEEDS_MORE_WORK 表明方案是否真的可进入 Dev; 若仍有阻塞缺口, 必须列出 MISSING: 清单.
 - "## 逐项评估" : 对上面 7 点逐一作答, 形式: "N. 标题 — ✅/❌ 说明".
 - "## 问题清单" : 若有问题, 按严重度(阻塞/建议)列出, 每条指向 plan.md 的具体章节或行文.
 - "## 给 Plan-Agent 的具体反馈" : 只在 FAIL 时填, 明确告诉下一轮 Plan-Agent 应当补充/修改哪些内容, 越具体越好.
 - 末尾单独一行:
 	- 若存在任何阻塞级问题或 Requirement 未覆盖 -> VERDICT: FAIL
-	- 否则 -> VERDICT: PASS`, iterBadge, spec, plan)
+	- 否则 -> VERDICT: PASS`, spec, plan)
 
 	prompt := withSafety(in.ProjectDir, safetyRulesForReader, body)
 	out, raw, err := a.invokeWith(ctx, in, prompt, in.WorkspaceDir, 600)
 	if err != nil {
 		return nil, err
 	}
-	out.Passed = parseVerdict(raw)
+	out.Passed = parseVerdict(raw) && parsePlanReviewReadiness(raw)
 	out.Summary = firstLines(raw, 12)
 	return out, nil
 }
@@ -589,6 +582,23 @@ func detectProjectKind(root string) string {
 		return "static"
 	}
 	return "unknown"
+}
+
+func parsePlanReviewReadiness(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		u := strings.ToUpper(strings.TrimSpace(line))
+		if !strings.HasPrefix(u, "STATUS:") {
+			continue
+		}
+		switch {
+		case strings.Contains(u, "NEEDS_MORE_WORK"), strings.Contains(u, "NEEDS_MORE_INFO"), strings.Contains(u, "FAIL"):
+			return false
+		case strings.Contains(u, "READY"), strings.Contains(u, "PASS"):
+			return true
+		}
+	}
+	// 兼容旧输出: 没有 STATUS 时仍由 VERDICT 决定.
+	return true
 }
 
 // firstLines 取前 n 行, 给 summary 用.

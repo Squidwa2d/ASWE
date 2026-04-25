@@ -32,9 +32,11 @@ type planYAMLUnit struct {
 	Deliverable string `yaml:"deliverable"`
 }
 
-// codeBlockRE 匹配 markdown 里的 ```yaml ... ``` 或 ``` ... ``` 代码块.
-// 使用 (?s) 让 "." 跨行. 捕获组 1 为代码块内容.
-var codeBlockRE = regexp.MustCompile("(?s)```(?:yaml|yml)?\\s*\\n(.*?)```")
+// codeBlockRE 匹配 markdown fenced code block.
+// 这里不强制 info string 必须精确等于 yaml, 因为不同模型常输出 ``` yaml、
+// ```YAML 或带属性的代码块; 真正的识别依据是代码块首个非空行的 marker.
+// 捕获组 2 为代码块内容.
+var codeBlockRE = regexp.MustCompile("(?ms)^[ \\t]{0,3}```[ \\t]*([^`\\n]*)\\n(.*?)^[ \\t]{0,3}```[ \\t]*$")
 
 // ExtractPlanModules 从 plan.md 原始内容中抽出嵌入的模块/单元 YAML, 并转成 []*Module.
 // 解析失败或未找到合法块时返回 (nil, error); 调用方可据此决定是否 fail plan-review.
@@ -103,7 +105,7 @@ func findPlanYAMLBlock(md string) (string, error) {
 		return "", fmt.Errorf("plan.md 中未找到 YAML 代码块")
 	}
 	for _, m := range matches {
-		body := m[1]
+		body := m[2]
 		trim := strings.TrimLeft(body, " \t\r\n")
 		// 首个非空行必须是 "# aswe-plan-modules"
 		firstLineEnd := strings.IndexByte(trim, '\n')

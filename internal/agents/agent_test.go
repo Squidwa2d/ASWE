@@ -42,6 +42,25 @@ func TestParseVerdict_PassFail(t *testing.T) {
 	}
 }
 
+func TestParsePlanReviewReadiness(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"ready", "## 放行门槛\nSTATUS: READY\n\nVERDICT: PASS", true},
+		{"needs more work", "## 放行门槛\nSTATUS: NEEDS_MORE_WORK\nMISSING:\n- 模块拆分过粗\n\nVERDICT: PASS", false},
+		{"legacy no status", "## 结论\n可通过\n\nVERDICT: PASS", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := parsePlanReviewReadiness(c.in); got != c.want {
+				t.Fatalf("parsePlanReviewReadiness() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestReadIfExists 覆盖存在/不存在/空路径三种情况.
 func TestReadIfExists(t *testing.T) {
 	if got := readIfExists(""); got != "" {

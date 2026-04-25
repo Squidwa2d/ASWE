@@ -52,7 +52,8 @@ type NodeResult struct {
 type State struct {
 	ChangeID     string                `json:"change_id"`
 	WorkspaceDir string                `json:"workspace_dir"`
-	ProjectDir   string                `json:"project_dir,omitempty"` // 代码落盘目录, 通常 <workspace>/projects/<change-id>
+	ProjectDir   string                `json:"project_dir,omitempty"`  // 代码落盘目录, 通常 <workspace>/projects/<change-id>
+	ArtifactDir  string                `json:"artifact_dir,omitempty"` // Agent 过程产物目录, 通常 <workspace>/.aswe/runs/<change-id>/artifacts
 	ProposalPath string                `json:"proposal_path,omitempty"`
 	SpecPath     string                `json:"spec_path,omitempty"`
 	TasksPath    string                `json:"tasks_path,omitempty"`
@@ -95,6 +96,16 @@ func New(changeID, workspaceDir string) *State {
 	}
 }
 
+// RunDir 返回某个 change 的运行时目录.
+func RunDir(workspaceDir, changeID string) string {
+	return filepath.Join(workspaceDir, ".aswe", "runs", changeID)
+}
+
+// ArtifactDir 返回某个 change 的 Agent 过程产物目录.
+func ArtifactDir(workspaceDir, changeID string) string {
+	return filepath.Join(RunDir(workspaceDir, changeID), "artifacts")
+}
+
 // Store 负责把 State 落盘并追加事件.
 type Store struct {
 	mu         sync.Mutex
@@ -105,7 +116,7 @@ type Store struct {
 
 // Open 打开(或创建) 某个 change 的 store.
 func Open(workspaceDir, changeID string) (*Store, error) {
-	runDir := filepath.Join(workspaceDir, ".aswe", "runs", changeID)
+	runDir := RunDir(workspaceDir, changeID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return nil, err
 	}

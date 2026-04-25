@@ -19,6 +19,41 @@ func TestExtractPlanModules_OK(t *testing.T) {
 	}
 }
 
+func TestExtractPlanModules_ToleratesFenceVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		md   string
+	}{
+		{
+			name: "space before yaml",
+			md:   "``` yaml\n# aswe-plan-modules\nmodules:\n  - id: A\n    title: 数据模型\n    units:\n      - id: A.1\n        title: 定义 Todo\n```\n",
+		},
+		{
+			name: "uppercase yaml",
+			md:   "```YAML\n# aswe-plan-modules\nmodules:\n  - id: A\n    title: 数据模型\n    units:\n      - id: A.1\n        title: 定义 Todo\n```\n",
+		},
+		{
+			name: "yaml with attributes",
+			md:   "```yaml {linenos=false}\n# aswe-plan-modules\nmodules:\n  - id: A\n    title: 数据模型\n    units:\n      - id: A.1\n        title: 定义 Todo\n```\n",
+		},
+		{
+			name: "indented fence",
+			md:   "   ```yaml\n# aswe-plan-modules\nmodules:\n  - id: A\n    title: 数据模型\n    units:\n      - id: A.1\n        title: 定义 Todo\n   ```\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mods, err := ExtractPlanModules(c.md)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if len(mods) != 1 || mods[0].ID != "A" || len(mods[0].Units) != 1 {
+				t.Fatalf("unexpected modules: %+v", mods)
+			}
+		})
+	}
+}
+
 func TestExtractPlanModules_NoMarker(t *testing.T) {
 	md := "```yaml\nfoo: bar\n```"
 	_, err := ExtractPlanModules(md)

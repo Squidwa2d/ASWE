@@ -57,7 +57,7 @@ type Unit struct {
 	LastError    string     `json:"last_error,omitempty"`
 	StartedAt    time.Time  `json:"started_at,omitempty"`
 	UpdatedAt    time.Time  `json:"updated_at,omitempty"`
-	// 分节产物相对 ChangeDir 的文件路径, 调试用
+	// 分节产物相对 ArtifactDir 的文件路径, 调试用
 	DevFile    string `json:"dev_file,omitempty"`
 	ReviewFile string `json:"review_file,omitempty"`
 	TestFile   string `json:"test_file,omitempty"`

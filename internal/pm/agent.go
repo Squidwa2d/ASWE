@@ -85,7 +85,7 @@ func (a *Agent) Run(ctx context.Context, userRequest string) (*Proposal, error) 
 	for turn := 0; turn < a.maxTurns; turn++ {
 		completed := turn // 已完成的有效轮数
 		belowMin := completed < a.minTurns
-		prompt := buildClarifyPrompt(qa, completed, a.minTurns)
+		prompt := buildClarifyPrompt(qa, belowMin)
 		resp, err := a.cli.Invoke(ctx, adapter.Request{
 			Prompt:         prompt,
 			WorkDir:        a.workspace,
@@ -97,8 +97,7 @@ func (a *Agent) Run(ctx context.Context, userRequest string) (*Proposal, error) 
 		}
 		questions, done := parseClarifyResponse(resp.Output)
 
-		// 最小轮数硬门槛: 即使模型说 READY, 或者一个问题都没给,
-		// 只要还没达到 minTurns, 都强制继续, 用兜底追问保证有东西可答.
+		// 最小轮数硬门槛只在代码侧执行, 不写进 prompt, 避免模型把它当成目标轮数.
 		if belowMin {
 			if done || len(questions) == 0 {
 				questions = defaultFallbackQuestions(completed)

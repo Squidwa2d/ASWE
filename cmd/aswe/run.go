@@ -63,6 +63,10 @@ func runRun(cmd *cobra.Command, changeID string, rf *runFlags) error {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		return fmt.Errorf("创建 project dir 失败: %w", err)
 	}
+	artifactDir := state.ArtifactDir(workspace, changeID)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return fmt.Errorf("创建 artifact dir 失败: %w", err)
+	}
 
 	factory := &adapter.Factory{GenericCommand: cfg.Generic.Command}
 	nodes := map[state.Stage]agents.Agent{}
@@ -117,11 +121,13 @@ func runRun(cmd *cobra.Command, changeID string, rf *runFlags) error {
 		st.CurrentStage = state.StageSpec
 	}
 	st.ProjectDir = projectDir
+	st.ArtifactDir = artifactDir
 	_ = store.Save()
 
 	fmt.Printf("📂 workspace    = %s\n", workspace)
 	fmt.Printf("📦 change       = %s\n", changeID)
 	fmt.Printf("🧱 project dir  = %s\n", projectDir)
+	fmt.Printf("📝 artifacts    = %s\n", artifactDir)
 	fmt.Printf("⚙️  mode         = %s\n", cfg.AutomationMode)
 	fmt.Printf("▶️  current stage = %s\n", st.CurrentStage)
 
@@ -151,6 +157,7 @@ func runRun(cmd *cobra.Command, changeID string, rf *runFlags) error {
 		Nodes:        nodes,
 		Mode:         cfg.AutomationMode,
 		ProjectDir:   projectDir,
+		ArtifactDir:  artifactDir,
 		MaxPlanLoops: cfg.MaxPlanLoops,
 		MinPlanLoops: cfg.MinPlanLoops,
 		MaxCodeLoops: cfg.MaxCodeLoops,

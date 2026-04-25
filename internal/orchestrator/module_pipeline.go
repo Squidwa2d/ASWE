@@ -22,12 +22,12 @@ type unitAgents struct {
 }
 
 // runModulePipeline 在 plan-review 通过后调用.
-//   - 解析 plan.md 中的 aswe-plan-modules YAML; 若解析失败, 返回 (false, nil) 让调用方
-//     回退到旧的线性 dev↔review↔test 路径.
+//   - 解析 plan.md 中的 aswe-plan-modules YAML; 若解析失败, 视为前置校验被绕过,
+//     直接返回错误, 不再静默回退到旧的线性 dev↔review↔test 路径.
 //   - 否则进入模块化流水线, 执行到 done / failed 并更新 State.CurrentStage.
 //
 // 返回 (handled, err): handled=true 表示模块化流程已处理, 调用方直接结束本次循环体.
-func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, ua *unitAgents) (bool, error) {
+func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir, artifactDir string, ua *unitAgents) (bool, error) {
 	st := o.store.State()
 
 	// 若 state 里还没有模块, 尝试从 plan.md 解析.
@@ -35,7 +35,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 	// 正常路径下此处必能解析成功. 真的失败通常意味着 state 被外部改过,
 	// 此时直接返回 error 交给人工处理, 而不是静默降级到线性流水线.
 	if len(st.Modules) == 0 {
-		planMD := readNodeOutputAt(changeDir, state.StagePlan)
+		planMD := readNodeOutputAt(artifactDir, state.StagePlan, changeDir)
 		mods, err := state.ExtractPlanModules(planMD)
 		if err != nil {
 			fmt.Fprintf(o.out, "🛑 plan.md 未通过机器校验 (%v); Plan-Review 的兜底校验可能被绕过, 请重跑 plan 阶段.\n", err)
@@ -52,8 +52,8 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 	}
 
 	// 进入模块循环, 逐模块完成
-	spec := readNodeOutputAt(changeDir, state.StageSpec)
-	plan := readNodeOutputAt(changeDir, state.StagePlan)
+	spec := readNodeOutputAt(artifactDir, state.StageSpec, changeDir)
+	plan := readNodeOutputAt(artifactDir, state.StagePlan, changeDir)
 
 	for {
 		st = o.store.State()
@@ -62,7 +62,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 			// 所有模块 done
 			st.CurrentStage = state.StageDone
 			_ = o.store.Save()
-			_ = state.WriteTasksMD(changeDir, st)
+			_ = state.WriteTasksMD(artifactDir, st)
 			fmt.Fprintln(o.out, "🎉 所有模块已完成.")
 			return true, nil
 		}
@@ -78,7 +78,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 			mod.Status = state.ModuleFailed
 			st.CurrentStage = state.StageFailed
 			_ = o.store.Save()
-			_ = state.WriteTasksMD(changeDir, st)
+			_ = state.WriteTasksMD(artifactDir, st)
 			fmt.Fprintf(o.out, "🛑 模块 %s 中存在超限失败单元, 流程暂停, 请人工介入.\n", mod.ID)
 			return true, fmt.Errorf("module %s failed: unit loop budget exceeded", mod.ID)
 		}
@@ -89,7 +89,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 			if mod.IsDone() {
 				mod.Status = state.ModuleDone
 				_ = o.store.Save()
-				_ = state.WriteTasksMD(changeDir, st)
+				_ = state.WriteTasksMD(artifactDir, st)
 				fmt.Fprintf(o.out, "✅ 模块 %s 全部单元 done\n", mod.ID)
 				continue
 			}
@@ -99,12 +99,12 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 			return true, fmt.Errorf("module %s stuck: no runnable unit and not done", mod.ID)
 		}
 
-		if err := o.runOneUnitStep(ctx, changeDir, st, mod, unit, spec, plan, ua); err != nil {
+		if err := o.runOneUnitStep(ctx, changeDir, artifactDir, st, mod, unit, spec, plan, ua); err != nil {
 			return true, err
 		}
 
 		// 每步都渲染 tasks.md, 让人可以实时看到进度
-		_ = state.WriteTasksMD(changeDir, st)
+		_ = state.WriteTasksMD(artifactDir, st)
 		_ = o.store.Save()
 	}
 }
@@ -112,7 +112,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir string, 
 // runOneUnitStep 根据 unit 当前状态决定执行 dev / review / test 中的哪一步.
 // FIFO 队列由 Module.NextRunnableUnit 负责, 本函数只负责推进"这一个被选中的单元"一步.
 func (o *Orchestrator) runOneUnitStep(
-	ctx context.Context, changeDir string, st *state.State,
+	ctx context.Context, changeDir, artifactDir string, st *state.State,
 	mod *state.Module, u *state.Unit, spec, plan string, ua *unitAgents,
 ) error {
 	maxLoops := st.MaxUnitLoops
@@ -123,6 +123,7 @@ func (o *Orchestrator) runOneUnitStep(
 		ChangeID:     st.ChangeID,
 		WorkspaceDir: st.WorkspaceDir,
 		ChangeDir:    changeDir,
+		ArtifactDir:  artifactDir,
 		ProjectDir:   st.ProjectDir,
 		Spec:         spec,
 		Plan:         plan,
@@ -207,7 +208,7 @@ func (o *Orchestrator) runOneUnitStep(
 				return nil
 			}
 			u.Status = state.UnitReviewFailed
-			u.LastFeedback = readArtifact(changeDir, u.ID, "review.md")
+			u.LastFeedback = readArtifact(artifactDir, changeDir, u.ID, "review.md")
 			u.Iteration++
 			fmt.Fprintf(o.out, "🔁 单元 %s Review 打回, 回到 dev (下轮 iter=%d)\n",
 				u.ID, u.Iteration)
@@ -242,7 +243,7 @@ func (o *Orchestrator) runOneUnitStep(
 				return nil
 			}
 			u.Status = state.UnitTestFailed
-			u.LastFeedback = readArtifact(changeDir, u.ID, "test.md")
+			u.LastFeedback = readArtifact(artifactDir, changeDir, u.ID, "test.md")
 			u.Iteration++
 			fmt.Fprintf(o.out, "🔁 单元 %s Test 未通过, 回到 dev (下轮 iter=%d)\n",
 				u.ID, u.Iteration)
@@ -257,13 +258,18 @@ func (o *Orchestrator) runOneUnitStep(
 	return nil
 }
 
-func readArtifact(changeDir, unitID, name string) string {
-	p := filepath.Join(changeDir, "units", unitID, name)
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return ""
+func readArtifact(artifactDir, legacyChangeDir, unitID, name string) string {
+	for _, dir := range []string{artifactDir, legacyChangeDir} {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, "units", unitID, name)
+		data, err := os.ReadFile(p)
+		if err == nil {
+			return string(data)
+		}
 	}
-	return string(data)
+	return ""
 }
 
 func (o *Orchestrator) printModuleOverview(st *state.State) {

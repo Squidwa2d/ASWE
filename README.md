@@ -144,20 +144,21 @@ aswe run <change-id> --mode auto        # 覆盖 automation_mode
 ```
 <workspace>/
 ├── openspec/changes/<change-id>/
-│   ├── proposal.md          # PM-Agent 产出 (澄清对话结果)
-│   ├── spec.md              # Spec-Agent (OpenSpec 规格: Requirement / Scenario)
-│   ├── plan.md              # Plan-Agent (技术方案 + 嵌入 aswe-plan-modules YAML)
-│   ├── plan-review.md       # Plan-Review-Agent (方案评审, 含 VERDICT: PASS/FAIL)
-│   ├── tasks.md             # 模块/单元进度看板 (人可读, 每步实时刷新)
-│   ├── dev.md / review.md / test.md  # 未启用模块化时的整体产物 (回退路径)
-│   └── units/<unit-id>/     # 启用模块化后, 每个单元独立产物目录
-│       ├── dev.md           #   Dev-Agent 的本轮实现摘要
-│       ├── review.md        #   Code-Review 的本轮意见
-│       └── test.md          #   Test-Agent 的本轮验证结果
-├── projects/<change-id>/    # Dev-Agent 真正落盘代码的位置 (安全边界)
+│   └── proposal.md          # PM-Agent 产出; openspec 只保留需求变更材料
+├── projects/<change-id>/    # Dev-Agent 真正落盘代码的位置 (安全边界), 不混入过程 md
 └── .aswe/runs/<change-id>/
     ├── state.json           # 编排状态快照 (含 Modules / Units / Iteration, 支持断点续跑)
-    └── events.jsonl         # 事件流日志 (每个 stage 的 start/end/error)
+    ├── events.jsonl         # 事件流日志 (每个 stage 的 start/end/error)
+    └── artifacts/           # Agent 过程产物, 可删除/归档, 不属于项目源码
+        ├── spec.md          # Spec-Agent (Requirement / Scenario)
+        ├── plan.md          # Plan-Agent (技术方案 + 嵌入 aswe-plan-modules YAML)
+        ├── plan-review.md   # Plan-Review-Agent (方案评审, 含 VERDICT: PASS/FAIL)
+        ├── tasks.md         # 模块/单元进度看板 (人可读, 每步实时刷新)
+        ├── dev.md / review.md / test.md  # 旧版线性流程整体产物
+        └── units/<unit-id>/ # 模块化后, 每个单元独立产物目录
+            ├── dev.md
+            ├── review.md
+            └── test.md
 ```
 
 ## 架构
@@ -168,7 +169,7 @@ aswe run <change-id> --mode auto        # 覆盖 automation_mode
 用户需求
    │
    ▼
-PM-Agent ──(至少 3 轮追问)──▶ proposal.md
+PM-Agent ──(质量门槛 + 代码侧最小轮数)──▶ proposal.md
    │
    ▼
 Spec-Agent ──▶ spec.md (Requirement / Scenario)
