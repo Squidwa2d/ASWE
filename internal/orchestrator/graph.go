@@ -292,7 +292,7 @@ func (o *Orchestrator) transition(st *state.State, cur state.Stage, out *agents.
 	switch cur {
 	case state.StagePlanReview:
 		// 机器侧强校验: YAML 必须存在且合法, 否则不管 AI 怎么说都视为 FAIL.
-		planMD := readNodeOutputAt(o.artifactDir, state.StagePlan, changeDir)
+		planMD := readPlanOutput(st.ProjectDir, o.artifactDir, changeDir)
 		yamlErr := validatePlanModules(planMD)
 		// 最小轮数兜底: 第一轮(PlanIteration=0) 总算已完成 1 轮, 若 minPlanLoops=2
 		// 则仅完成轮数 < 2 时要强制再跑; 仅在 AI 已判 PASS 且机校通过时才生效,
@@ -463,4 +463,22 @@ func readNodeOutputAt(artifactDir string, s state.Stage, fallbackDirs ...string)
 		}
 	}
 	return ""
+}
+
+func readPlanOutput(projectDir, artifactDir string, fallbackDirs ...string) string {
+	if data := readFileAt(projectDir, "plan.md"); data != "" {
+		return data
+	}
+	return readNodeOutputAt(artifactDir, state.StagePlan, fallbackDirs...)
+}
+
+func readFileAt(dir, name string) string {
+	if dir == "" || name == "" {
+		return ""
+	}
+	data, err := os.ReadFile(dir + string(os.PathSeparator) + name)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }

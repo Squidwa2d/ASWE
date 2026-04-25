@@ -35,7 +35,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir, artifac
 	// 正常路径下此处必能解析成功. 真的失败通常意味着 state 被外部改过,
 	// 此时直接返回 error 交给人工处理, 而不是静默降级到线性流水线.
 	if len(st.Modules) == 0 {
-		planMD := readNodeOutputAt(artifactDir, state.StagePlan, changeDir)
+		planMD := readPlanOutput(st.ProjectDir, artifactDir, changeDir)
 		mods, err := state.ExtractPlanModules(planMD)
 		if err != nil {
 			fmt.Fprintf(o.out, "🛑 plan.md 未通过机器校验 (%v); Plan-Review 的兜底校验可能被绕过, 请重跑 plan 阶段.\n", err)
@@ -53,7 +53,7 @@ func (o *Orchestrator) runModulePipeline(ctx context.Context, changeDir, artifac
 
 	// 进入模块循环, 逐模块完成
 	spec := readNodeOutputAt(artifactDir, state.StageSpec, changeDir)
-	plan := readNodeOutputAt(artifactDir, state.StagePlan, changeDir)
+	plan := readPlanOutput(st.ProjectDir, artifactDir, changeDir)
 
 	for {
 		st = o.store.State()
